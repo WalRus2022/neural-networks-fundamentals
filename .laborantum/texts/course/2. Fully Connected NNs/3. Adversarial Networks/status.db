@@ -1,0 +1,4 @@
+{
+    "correct": 0,
+    "error": "<frozen task>:180: UserWarning: FigureCanvasAgg is non-interactive, and thus cannot be shown\nIllegal instruction (core dumped)\n"
+}

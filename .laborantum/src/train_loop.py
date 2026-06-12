@@ -38,7 +38,7 @@ def _batch_status(batch_losses, batch_loss_emas):
         for loss_name, loss_value in batch_losses.items():
             loss_ema = None if batch_loss_emas is None else batch_loss_emas.get(loss_name)
             lines.append(
-                f'{loss_name}:\t train {_value_text(loss_value)} | ema {_value_text(loss_ema)}'
+                f'{loss_name}:\t train {_value_text(_number(loss_value))} | ema {_value_text(loss_ema)}'
             )
     return '\n'.join(lines)
 
@@ -81,7 +81,7 @@ def _keep_bar_message_on_close(bar, get_message):
 
 
 def _epoch_status(valid_losses, train_losses, valid_metrics=None, train_metrics=None):
-    lines = [f'epoch loss:']
+    lines = ['epoch loss:']
 
     loss_names = list((valid_losses or {}).keys())
     loss_names += [
@@ -99,7 +99,7 @@ def _epoch_status(valid_losses, train_losses, valid_metrics=None, train_metrics=
                 f'{loss_name}:\t val {_value_text(valid_loss)} | train {_value_text(train_loss)}'
             )
 
-    lines.append(f'epoch metrics:')
+    lines.append('epoch metrics:')
 
     if not valid_metrics and not train_metrics:
         lines.append('-')
@@ -136,15 +136,20 @@ def _empty_loss_totals(losses):
 
 def _compute_losses(losses, batch):
     return {
-        ## YOUR CODE HERE
+        loss_name: loss_fn(batch)
+        for loss_name, loss_fn in losses.items()
     }
 
 
 def _sum_losses(batch_losses):
     total_loss = None
+
     for loss_value in batch_losses.values():
-        ...
-        ## YOUR CODE HERE
+        if total_loss is None:
+            total_loss = loss_value
+        else:
+            total_loss = total_loss + loss_value
+
     return total_loss
 
 
@@ -171,11 +176,11 @@ def _finalize_loss_totals(loss_totals):
 
 
 def _update_metric_totals(metric_totals, metrics, batch):
-    
-    
     for metric_name, metric_fn in metrics.items():
-        ...
-        ## YOUR CODE HERE
+        enumerator, denominator = metric_fn(batch)
+
+        metric_totals[metric_name]['enumerator'] += _number(enumerator)
+        metric_totals[metric_name]['denominator'] += _number(denominator)
 
 
 def _finalize_metric_totals(metric_totals):
@@ -202,13 +207,17 @@ def train_model(
         raise TypeError('loss must be a function or a dictionary mapping loss names to loss functions')
     if not losses:
         raise ValueError('loss must contain at least one loss function')
+
     train_loss_history = {loss_name: [] for loss_name in losses}
     valid_loss_history = {loss_name: [] for loss_name in losses}
+
     metrics = {} if metrics is None else metrics
     if not isinstance(metrics, dict):
         raise TypeError('metrics must be a dictionary mapping metric names to metric functions')
+
     train_metrics_history = {metric_name: [] for metric_name in metrics}
     valid_metrics_history = {metric_name: [] for metric_name in metrics}
+
     batch_bar_total = len(train_dl)
 
     if mlflow_logger is not None:
@@ -230,8 +239,10 @@ def train_model(
 
     with tqdm(total=n_epochs, desc='epochs', position=0) as epoch_bar:
         _keep_bar_message_on_close(epoch_bar, lambda: final_epoch_message)
+
         with tqdm(total=batch_bar_total, desc='batches', position=1, leave=True) as batch_bar:
             _keep_bar_message_on_close(batch_bar, lambda: final_batch_message)
+
             for epoch in range(n_epochs):
                 train_losses = _empty_loss_totals(losses)
                 valid_losses = _empty_loss_totals(losses)
@@ -248,17 +259,19 @@ def train_model(
                 for batch_index, batch in enumerate(train_dl):
                     batch = {'data': batch}
 
-                    ## YOUR CODE HERE
-                    # Implement one training step:
-                    # switch to training mode
-                    # reset gradients
-                    # run the model
-                    # compute named losses
-                    # store named losses and their sum
-                    # backpropagate through the summed loss
-                    # update weights,
-                    # switch the model to evaluation mode
-                    # update metric numerators/denominators.
+                    model.train()
+                    optimizer.zero_grad()
+
+                    model(batch)
+
+                    loss_values = _compute_losses(losses, batch)
+                    total_loss = _sum_losses(loss_values)
+
+                    total_loss.backward()
+                    optimizer.step()
+
+                    model.eval()
+                    _update_metric_totals(train_metrics, metrics, batch)
 
                     _update_loss_totals(train_losses, loss_values)
                     _update_loss_emas(loss_emas, loss_values)
@@ -273,22 +286,21 @@ def train_model(
                         for loss_name, loss_value in loss_values.items():
                             mlflow_logger.log_metric(
                                 _loss_metric_name('batch/train', loss_name),
-                                loss_value,
+                                _number(loss_value),
                                 step=global_step,
                             )
+
+                model.eval()
 
                 with torch.no_grad():
                     for valid_batch in valid_dl:
                         valid_batch = {'data': valid_batch}
 
-                        ## YOUR CODE HERE
-                        # Implement one validation step:
-                        # switch the model to evaluation mode
-                        # run the model without gradients
-                        # compute and store named validation losses
-                        # and update metric numerators/denominators. 
-                        # Do not call backward() or step().
+                        model(valid_batch)
 
+                        valid_loss_values = _compute_losses(losses, valid_batch)
+
+                        _update_metric_totals(valid_metrics, metrics, valid_batch)
                         _update_loss_totals(valid_losses, valid_loss_values)
 
                 finalized_train_losses = _finalize_loss_totals(train_losses)
@@ -300,6 +312,7 @@ def train_model(
 
                 finalized_train_metrics = _finalize_metric_totals(train_metrics)
                 finalized_valid_metrics = _finalize_metric_totals(valid_metrics)
+
                 for metric_name in metrics:
                     train_metrics_history[metric_name].append(finalized_train_metrics[metric_name])
                     valid_metrics_history[metric_name].append(finalized_valid_metrics[metric_name])
@@ -336,19 +349,18 @@ def train_model(
                         scheduler.step()
 
                 epoch_bar.update(1)
+
                 final_epoch_message = _epoch_status(
                     finalized_valid_losses,
                     finalized_train_losses,
                     finalized_valid_metrics,
                     finalized_train_metrics,
                 )
-                _set_bar_message(
-                    epoch_bar,
-                    final_epoch_message,
-                )
+                _set_bar_message(epoch_bar, final_epoch_message)
 
     if final_epoch_message is not None:
         _set_bar_message(epoch_bar, final_epoch_message)
+
     if final_batch_message is not None:
         _set_bar_message(batch_bar, final_batch_message)
 
