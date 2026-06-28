@@ -81,7 +81,7 @@ class GAN(torch.nn.Module):
         if 'postprocessed' not in batch:
             batch['postprocessed'] = {}
 
-        batch['signals']['generated'] = generated.reshape(noise.shape[0], 28, 28)
+        batch['signals']['generated'] = generated.reshape(noise.shape[0], 784)
         batch['signals']['discriminator_logits'] = discriminator_logits
         batch['signals']['fake_logits'] = fake_logits
         batch['signals']['real_logits'] = real_logits
@@ -89,16 +89,12 @@ class GAN(torch.nn.Module):
         batch['signals']['fake_scores'] = fake_logits
         batch['signals']['real_scores'] = real_logits
 
-        batch['postprocessed']['discriminator_logits'] = discriminator_logits
-        batch['postprocessed']['discriminator_scores'] = discriminator_logits
-        batch['postprocessed']['discriminator_probabilities'] = torch.sigmoid(discriminator_logits)
+        batch['postprocessed']['discriminator_score'] = discriminator_logits
+        batch['postprocessed']['discriminator_probability'] = torch.sigmoid(discriminator_logits)
 
-        batch['postprocessed']['fake_logits'] = fake_logits
-        batch['postprocessed']['fake_scores'] = fake_logits
-        batch['postprocessed']['fake_probabilities'] = torch.sigmoid(fake_logits)
+        batch['postprocessed']['fake_score'] = fake_logits
+        batch['postprocessed']['fake_probability'] = torch.sigmoid(fake_logits)
 
-        batch['postprocessed']['real_logits'] = real_logits
-        batch['postprocessed']['real_scores'] = real_logits
-        batch['postprocessed']['real_probabilities'] = torch.sigmoid(real_logits)
-
+        batch['postprocessed']['real_score'] = real_logits
+        batch['postprocessed']['real_probability'] = torch.sigmoid(real_logits)
         return batch

@@ -1,5 +1,5 @@
 {
-    "correct": 0.9901960784313726,
+    "correct": 1,
     "testStatus": [
         {
             "name": "root -> init_pred",
@@ -508,8 +508,8 @@
         },
         {
             "name": "root -> trained_pred",
-            "ok": false,
-            "status": "FAILED: answers do not match:\nMaximal average mismatch: 0.0001\nreceived average mismatch: 0.012171927799039639"
+            "ok": true,
+            "status": "OK"
         }
     ]
 }

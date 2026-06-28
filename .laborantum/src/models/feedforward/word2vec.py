@@ -1,125 +1,263 @@
-import heapq
-
 import torch
 import torch.nn.functional as F
 
 
-class HierarchicalSoftmaxTargets:
-    def __init__(self, word_counts, word_to_index):
-        active_counts = {
-            word_to_index[word]: int(count)
-            for word, count in word_counts.items()
-            if word in word_to_index
-        }
-        if len(active_counts) <= 1:
-            self.paths = {0: [0]}
-            self.codes = {0: [1]}
-            self.num_internal_nodes = 1
-            self.max_path_length = 1
-            return
+class BinaryIndexTree:
+    def __init__(self, vocab_size):
+        self.vocab_size = int(vocab_size)
+        if self.vocab_size <= 0:
+            raise ValueError('vocab_size must be positive')
+        self.depth = max(1, (self.vocab_size - 1).bit_length())
+        self.max_path_length = self.depth
+        self.num_internal_nodes = 2 ** self.depth - 1
 
-        next_internal_id = 0
-        serial = 0
-        heap = []
-        for word_index, count in active_counts.items():
-            heapq.heappush(heap, (count, serial, {'word': word_index}))
-            serial += 1
+    def targets_for_index(self, word_index):
+        word_index = int(word_index)
+        if word_index < 0 or word_index >= self.vocab_size:
+            raise ValueError(f'word index {word_index} is outside vocabulary')
+        return format(word_index, f'0{self.depth}b')
 
-        while len(heap) > 1:
-            left_count, _, left = heapq.heappop(heap)
-            right_count, _, right = heapq.heappop(heap)
-            node = {
-                'node': next_internal_id,
-                'left': left,
-                'right': right,
-            }
-            next_internal_id += 1
-            heapq.heappush(heap, (left_count + right_count, serial, node))
-            serial += 1
+    @staticmethod
+    def node_id_from_prefix(prefix_bits):
+        if isinstance(prefix_bits, str):
+            prefix = prefix_bits
+        else:
+            prefix = ''.join(str(int(bit)) for bit in prefix_bits)
+        if not prefix:
+            return 0
+        depth = len(prefix)
+        return (2 ** depth - 1) + int(prefix, 2)
 
-        paths = {}
-        codes = {}
-
-        def walk(node, path, code):
-            if 'word' in node:
-                paths[node['word']] = path.copy()
-                codes[node['word']] = code.copy()
-                return
-            walk(node['left'], path + [node['node']], code + [0])
-            walk(node['right'], path + [node['node']], code + [1])
-
-        walk(heap[0][2], [], [])
-        self.paths = paths
-        self.codes = codes
-        self.num_internal_nodes = next_internal_id
-        self.max_path_length = max(len(path) for path in self.paths.values())
+    def path_and_targets(self, word_index):
+        targets_string = self.targets_for_index(word_index)
+        path = [
+            self.node_id_from_prefix(targets_string[:step])
+            for step in range(self.depth)
+        ]
+        targets = [int(bit) for bit in targets_string]
+        return path, targets
 
     def __call__(self, context_word):
         device = context_word.device
         context_word = context_word.detach().cpu().view(-1).tolist()
-        paths = []
-        codes = []
-        masks = []
-        for word_index in context_word:
-            path = self.paths[int(word_index)]
-            code = self.codes[int(word_index)]
-            padding = self.max_path_length - len(path)
-            paths.append(path + [0] * padding)
-            codes.append(code + [0] * padding)
-            masks.append([1.0] * len(path) + [0.0] * padding)
-        return {
-            'path': torch.tensor(paths, dtype=torch.long, device=device),
-            'code': torch.tensor(codes, dtype=torch.float32, device=device),
-            'mask': torch.tensor(masks, dtype=torch.float32, device=device),
+        fallback_batch_size = len(context_word)
+
+        fallback = {
+            'path': torch.zeros(
+                fallback_batch_size,
+                self.max_path_length,
+                dtype=torch.long,
+                device=device,
+            ),
+            'targets': torch.zeros(
+                fallback_batch_size,
+                self.max_path_length,
+                dtype=torch.float32,
+                device=device,
+            ),
+            'mask': torch.ones(
+                fallback_batch_size,
+                self.max_path_length,
+                dtype=torch.float32,
+                device=device,
+            ),
         }
 
+        ## YOUR CODE HERE
+        paths = []
+        targets = []
 
-class HierarchicalSoftmaxLoss(torch.nn.Module):
-    def __init__(self, model, targets):
+        for word_index in context_word:
+            path, target = self.path_and_targets(int(word_index))
+            paths.append(path)
+            targets.append(target)
+
+        fallback = {
+            'path': torch.tensor(paths, dtype=torch.long, device=device),
+            'targets': torch.tensor(targets, dtype=torch.float32, device=device),
+            'mask': torch.ones(
+                fallback_batch_size,
+                self.max_path_length,
+                dtype=torch.float32,
+                device=device,
+            ),
+        }
+
+        return fallback
+
+
+class HierarchicalSoftmax(torch.nn.Module):
+    def __init__(self, embedding_dim, vocab_size):
         super().__init__()
-        self.model = model
-        self.targets = targets
+        self.embedding_dim = int(embedding_dim)
+        self.targets = BinaryIndexTree(vocab_size)
+        self.decoder = torch.nn.Embedding(
+            self.targets.num_internal_nodes,
+            self.embedding_dim,
+        )
+        torch.nn.init.zeros_(self.decoder.weight)
 
-    def forward(self, batch):
-        target_tensors = self.targets(batch['data']['context_word'])
-        batch['data'].update(target_tensors)
-        embedding = batch['signals']['embedding']
-        node_vectors = self.model.decoder(batch['data']['path'])
-        logits = torch.einsum('bd,bld->bl', embedding, node_vectors)
-        batch['signals']['logits'] = logits
-        batch['signals']['probabilities'] = torch.sigmoid(logits)
-        batch['postprocessed']['code'] = (batch['signals']['probabilities'] >= 0.5).long()
-        per_node_loss = F.binary_cross_entropy_with_logits(
-            logits,
-            batch['data']['code'],
+        ## YOUR CODE HERE
+        self.embedding_dim = int(embedding_dim)
+        self.targets = BinaryIndexTree(vocab_size)
+        self.decoder = torch.nn.Embedding(
+            self.targets.num_internal_nodes,
+            self.embedding_dim,
+        )
+        torch.nn.init.normal_(self.decoder.weight, mean=0.0, std=0.02)
+
+    @property
+    def num_internal_nodes(self):
+        return self.targets.num_internal_nodes
+
+    @property
+    def max_path_length(self):
+        return self.targets.max_path_length
+
+    def forward(self, embedding, target_word):
+        target_tensors = self.targets(target_word)
+        node_vectors = self.decoder(target_tensors['path'])
+        fallback_logits = torch.einsum('bd,bld->bl', embedding, node_vectors) * 0.0
+        fallback_probabilities = torch.sigmoid(fallback_logits)
+        fallback_target_probabilities = torch.where(
+            target_tensors['targets'].bool(),
+            fallback_probabilities,
+            1.0 - fallback_probabilities,
+        )
+        fallback_total_probability = fallback_target_probabilities.prod(dim=1)
+        fallback_per_node_loss = F.binary_cross_entropy_with_logits(
+            fallback_logits,
+            target_tensors['targets'],
             reduction='none',
         )
-        masked_loss = per_node_loss * batch['data']['mask']
-        return masked_loss.sum() / batch['data']['mask'].sum().clamp_min(1.0)
+        fallback_per_word_loss = (fallback_per_node_loss * target_tensors['mask']).sum(dim=1)
+
+        fallback = {
+            **target_tensors,
+            'logits': fallback_logits,
+            'probabilities': fallback_probabilities,
+            'target_probabilities': fallback_target_probabilities,
+            'total_probability': fallback_total_probability,
+            'per_node_loss': fallback_per_node_loss,
+            'per_word_loss': fallback_per_word_loss,
+            'loss': fallback_per_word_loss.mean(),
+        }
+
+        ## YOUR CODE HERE
+        node_vectors = self.decoder(target_tensors['path'])
+        logits = torch.einsum('bd,bld->bl', embedding, node_vectors)
+        probabilities = torch.sigmoid(logits)
+
+        target_probabilities = torch.where(
+            target_tensors['targets'].bool(),
+            probabilities,
+            1.0 - probabilities,
+        )
+
+        per_node_loss = F.binary_cross_entropy_with_logits(
+            logits,
+            target_tensors['targets'],
+            reduction='none',
+        )
+        per_word_loss = (per_node_loss * target_tensors['mask']).sum(dim=1)
+
+        fallback = {
+            **target_tensors,
+            'logits': logits,
+            'probabilities': probabilities,
+            'target_probabilities': target_probabilities,
+            'total_probability': target_probabilities.prod(dim=1),
+            'per_node_loss': per_node_loss,
+            'per_word_loss': per_word_loss,
+            'loss': per_word_loss.mean(),
+        }
+
+        return fallback
 
 
-class Word2VecHierarchicalSoftmax(torch.nn.Module):
-    def __init__(self, vocab_size, embedding_dim, num_internal_nodes):
+class Word2Vec(torch.nn.Module):
+    def __init__(self, vocab_size, embedding_dim):
         super().__init__()
         self.vocab_size = int(vocab_size)
         self.embedding_dim = int(embedding_dim)
-        self.num_internal_nodes = int(num_internal_nodes)
         self.encoder = torch.nn.Embedding(self.vocab_size, self.embedding_dim)
-        self.decoder = torch.nn.Embedding(self.num_internal_nodes, self.embedding_dim)
+        torch.nn.init.zeros_(self.encoder.weight)
+        self.hierarchical_softmax = HierarchicalSoftmax(
+            self.embedding_dim,
+            self.vocab_size,
+        )
+        self.decoder = self.hierarchical_softmax.decoder
+        self.num_internal_nodes = self.hierarchical_softmax.num_internal_nodes
 
         ## YOUR CODE HERE
-
-    def __forward_kernel(self, center_word, path):
-        embedding = self.encoder(center_word)
-        node_vectors = self.decoder(path)
-        logits = torch.einsum('bd,bld->bl', embedding, node_vectors)
-        return embedding, logits
+        self.vocab_size = int(vocab_size)
+        self.embedding_dim = int(embedding_dim)
+        self.encoder = torch.nn.Embedding(self.vocab_size, self.embedding_dim)
+        self.hierarchical_softmax = HierarchicalSoftmax(
+            self.embedding_dim,
+            self.vocab_size,
+        )
+        self.decoder = self.hierarchical_softmax.decoder
+        self.num_internal_nodes = self.hierarchical_softmax.num_internal_nodes
+        torch.nn.init.normal_(self.encoder.weight, mean=0.0, std=0.02)
 
     def forward(self, batch):
+        center_word = batch['data']['center_word']
+        embedding = self.encoder(center_word)
+        batch['signals'] = {
+            'embedding': embedding,
+        }
+        batch['postprocessed'] = {}
+
+        if 'context_word' in batch['data']:
+            target_tensors = self.hierarchical_softmax.targets(batch['data']['context_word'])
+            fallback_logits = torch.zeros_like(target_tensors['targets'])
+            fallback_probabilities = torch.sigmoid(fallback_logits)
+            fallback_target_probabilities = torch.where(
+                target_tensors['targets'].bool(),
+                fallback_probabilities,
+                1.0 - fallback_probabilities,
+            )
+            fallback_per_node_loss = F.binary_cross_entropy_with_logits(
+                fallback_logits,
+                target_tensors['targets'],
+                reduction='none',
+            )
+            fallback_per_word_loss = (fallback_per_node_loss * target_tensors['mask']).sum(dim=1)
+            batch['data'].update(target_tensors)
+            batch['signals']['logits'] = fallback_logits
+            batch['signals']['probabilities'] = fallback_probabilities
+            batch['signals']['target_probabilities'] = fallback_target_probabilities
+            batch['signals']['total_probability'] = fallback_target_probabilities.prod(dim=1)
+            batch['signals']['loss'] = fallback_per_word_loss.mean()
+            batch['postprocessed']['targets'] = (fallback_probabilities >= 0.5).long()
+
+        fallback = batch
+
         ## YOUR CODE HERE
-        if 'signals' not in batch:
-            batch['signals'] = {
-                'embedding': self.encoder(batch['data']['center_word']),
-            }
-            batch['postprocessed'] = {}
-        return batch
+        if 'context_word' in batch['data']:
+            hs_output = self.hierarchical_softmax(
+                embedding,
+                batch['data']['context_word'],
+            )
+
+            batch['data'].update({
+                'path': hs_output['path'],
+                'targets': hs_output['targets'],
+                'mask': hs_output['mask'],
+            })
+
+            batch['signals'].update({
+                'logits': hs_output['logits'],
+                'probabilities': hs_output['probabilities'],
+                'target_probabilities': hs_output['target_probabilities'],
+                'total_probability': hs_output['total_probability'],
+                'loss': hs_output['loss'],
+            })
+
+            batch['postprocessed']['targets'] = (
+                hs_output['probabilities'] >= 0.5
+            ).long()
+
+        fallback = batch
+        return fallback
